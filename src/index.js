@@ -9,6 +9,7 @@ import {
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import fs from 'fs';
 import JiraClient from 'jira-client';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -135,6 +136,30 @@ const GET_TASK_ATTACHMENTS_TOOL = {
   }
 };
 
+const DOWNLOAD_TASK_ATTACHMENT_TOOL = {
+  name: "downloadTaskAttachment",
+  description: "Download a specific attachment from a JIRA task by filename",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      },
+      filename: {
+        type: "string",
+        description: "Exact filename of the attachment to download"
+      },
+      outputPath: {
+        type: "string",
+        description: "Optional absolute path where the downloaded attachment should be written to. If empty, the content is returned.",
+        nullable: true
+      }
+    },
+    required: ["taskId", "filename"]
+  }
+};
+
 const GET_AVAILABLE_STATUSES_TOOL = {
   name: "getAvailableStatuses",
   description: "Get list of available JIRA statuses for a task",
@@ -171,7 +196,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     UPDATE_TASK_STATUS_TOOL,
     UPDATE_TASK_OWNER_TOOL,
     GET_AVAILABLE_STATUSES_TOOL,
-    GET_TASK_ATTACHMENTS_TOOL
+    GET_TASK_ATTACHMENTS_TOOL,
+    DOWNLOAD_TASK_ATTACHMENT_TOOL
   ],
 }));
 
@@ -320,6 +346,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             })) || [], null, 2)
           }]
         };
+
+      case "downloadTaskAttachment":
+        const { taskId: downloadTaskId, filename, outputPath } = request.params.arguments;
+        try {
+          const issueWithAttachments = await jiraClient.findIssue(downloadTaskId);
+          const attachment = issueWithAttachments.fields.attachment?.find(att => att.filename === filename);
+
+          if (!attachment) {
+            return {
+              content: [{
+                type: "text",
+                text: `Attachment with filename '${filename}' not found for task ${downloadTaskId}`
+              }],
+              isError: true
+            };
+          }
+
+          // The 'content' field in the attachment object contains the download URL
+          const attachmentUrl = attachment.content;
+          const response = await fetch(attachmentUrl, {
+            headers: {
+              'Authorization': `Basic ${Buffer.from(`${process.env.JIRA_USERNAME}:${process.env.JIRA_PASSWORD || process.env.JIRA_ACCESS_TOKEN}`).toString('base64')}`
+            }
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to download attachment: ${response.statusText}`);
+          }
+
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+
+          if (outputPath) {
+            // Write to file if outputPath is provided
+            await fs.promises.writeFile(outputPath, buffer);
+            return {
+              content: [{
+                type: "text",
+                text: `Attachment downloaded to ${outputPath}`
+              }]
+            };
+          } else {
+            // Return base64 content if outputPath is not provided
+            const base64Content = buffer.toString('base64');
+            return {
+              content: [{
+                type: "text",
+                text: base64Content,
+              }],
+              metadata: {
+                filename: attachment.filename,
+                mimeType: attachment.mimeType,
+                size: attachment.size
+              }
+            };
+          }
+
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error downloading attachment for task ${downloadTaskId}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
 
       default:
         return {

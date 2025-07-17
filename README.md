@@ -11,6 +11,7 @@ A Model Context Protocol (MCP) server that addresses integration with self-hoste
 - Update task assignee
 - Get available task statuses
 - Get task attachments
+- Download task attachments by filename
 
 ## Installation
 
@@ -41,6 +42,33 @@ npm start
 ```
 
 The server will start and register itself with any MCP-compatible AI assistants.
+
+### Available Tools
+
+#### downloadTaskAttachment
+
+Download a specific attachment from a JIRA task by filename.
+
+**Parameters:**
+- `taskId` (string, required): JIRA task ID (e.g., PROJECT-123)
+- `filename` (string, required): Exact filename of the attachment to download
+
+**Response:**
+Returns base64 encoded binary data with metadata including:
+- `filename`: The name of the downloaded file
+- `mimeType`: The MIME type of the file
+- `size`: The file size in bytes
+- `content`: Base64 encoded file content
+
+**Example Usage:**
+```json
+{
+  "taskId": "PROJECT-123",
+  "filename": "document.pdf"
+}
+```
+
+This function is useful for retrieving specific attachments from JIRA tasks when you know the exact filename, allowing you to download and process files programmatically.
 
 ## Dependencies
 

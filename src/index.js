@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import fs from 'fs';
 import JiraClient from 'jira-client';
 
@@ -160,6 +160,25 @@ const DOWNLOAD_TASK_ATTACHMENT_TOOL = {
   }
 };
 
+const DOWNLOAD_TASK_ATTACHMENTS_TOOL = {
+  name: "downloadTaskAttachments",
+  description: "Download all attachments from a JIRA task to a specified directory",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      },
+      outputPath: {
+        type: "string",
+        description: "Directory path where all attachments should be downloaded"
+      }
+    },
+    required: ["taskId", "outputPath"]
+  }
+};
+
 const GET_AVAILABLE_STATUSES_TOOL = {
   name: "getAvailableStatuses",
   description: "Get list of available JIRA statuses for a task",
@@ -197,7 +216,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     UPDATE_TASK_OWNER_TOOL,
     GET_AVAILABLE_STATUSES_TOOL,
     GET_TASK_ATTACHMENTS_TOOL,
-    DOWNLOAD_TASK_ATTACHMENT_TOOL
+    DOWNLOAD_TASK_ATTACHMENT_TOOL,
+    DOWNLOAD_TASK_ATTACHMENTS_TOOL
   ],
 }));
 
@@ -408,6 +428,100 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{
               type: "text",
               text: `Error downloading attachment for task ${downloadTaskId}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+
+      case "downloadTaskAttachments":
+        const { taskId: downloadAllTaskId, outputPath: downloadDirectory } = request.params.arguments;
+        try {
+          // First, get all attachments for the task
+          const issueWithAllAttachments = await jiraClient.findIssue(downloadAllTaskId);
+          const attachments = issueWithAllAttachments.fields.attachment || [];
+
+          if (attachments.length === 0) {
+            return {
+              content: [{
+                type: "text",
+                text: `No attachments found for task ${downloadAllTaskId}`
+              }],
+              isError: true
+            };
+          }
+
+          // Ensure the output directory exists
+          const absoluteOutputPath = resolve(downloadDirectory);
+          await fs.promises.mkdir(absoluteOutputPath, { recursive: true });
+
+          const downloadResults = [];
+          const errors = [];
+
+          // Download each attachment
+          for (const attachment of attachments) {
+            try {
+              const attachmentUrl = attachment.content;
+              const response = await fetch(attachmentUrl, {
+                headers: {
+                  'Authorization': `Basic ${Buffer.from(`${process.env.JIRA_USERNAME}:${process.env.JIRA_PASSWORD || process.env.JIRA_ACCESS_TOKEN}`).toString('base64')}`
+                }
+              });
+
+              if (!response.ok) {
+                throw new Error(`Failed to download attachment ${attachment.filename}: ${response.statusText}`);
+              }
+
+              const arrayBuffer = await response.arrayBuffer();
+              const buffer = Buffer.from(arrayBuffer);
+              const filePath = join(absoluteOutputPath, attachment.filename);
+
+              await fs.promises.writeFile(filePath, buffer);
+              downloadResults.push({
+                filename: attachment.filename,
+                path: filePath,
+                size: attachment.size,
+                mimeType: attachment.mimeType
+              });
+            } catch (error) {
+              errors.push({
+                filename: attachment.filename,
+                error: error.message
+              });
+            }
+          }
+
+          // Prepare the response
+          const successCount = downloadResults.length;
+          const errorCount = errors.length;
+          let responseText = `Downloaded ${successCount} of ${attachments.length} attachments for task ${downloadAllTaskId}\n\n`;
+          
+          if (downloadResults.length > 0) {
+            responseText += "Successfully downloaded:\n";
+            downloadResults.forEach(result => {
+              responseText += `- ${result.filename} (${result.size} bytes) -> ${result.path}\n`;
+            });
+          }
+
+          if (errors.length > 0) {
+            responseText += "\nFailed downloads:\n";
+            errors.forEach(error => {
+              responseText += `- ${error.filename}: ${error.error}\n`;
+            });
+          }
+
+          return {
+            content: [{
+              type: "text",
+              text: responseText
+            }],
+            isError: errorCount > 0 && successCount === 0
+          };
+
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error downloading attachments for task ${downloadAllTaskId}: ${error.message}`
             }],
             isError: true
           };

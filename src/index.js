@@ -194,10 +194,44 @@ const GET_AVAILABLE_STATUSES_TOOL = {
   }
 };
 
+const ADD_COMMENT_TOOL = {
+  name: "addTaskComment",
+  description: "Add a comment to a JIRA task",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      },
+      comment: {
+        type: "string",
+        description: "Comment text to add to the task"
+      }
+    },
+    required: ["taskId", "comment"]
+  }
+};
+
+const GET_COMMENTS_TOOL = {
+  name: "getTaskComments",
+  description: "Get all comments for a JIRA task",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      }
+    },
+    required: ["taskId"]
+  }
+};
+
 const server = new Server(
   {
     name: "jira-mcp",
-    version: "1.0.0",
+    version: "1.1.0",
   },
   {
     capabilities: {
@@ -217,7 +251,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     GET_AVAILABLE_STATUSES_TOOL,
     GET_TASK_ATTACHMENTS_TOOL,
     DOWNLOAD_TASK_ATTACHMENT_TOOL,
-    DOWNLOAD_TASK_ATTACHMENTS_TOOL
+    DOWNLOAD_TASK_ATTACHMENTS_TOOL,
+    ADD_COMMENT_TOOL,
+    GET_COMMENTS_TOOL
   ],
 }));
 
@@ -522,6 +558,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{
               type: "text",
               text: `Error downloading attachments for task ${downloadAllTaskId}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+
+      case "addTaskComment":
+        const { taskId: commentTaskId, comment } = request.params.arguments;
+        try {
+          // Add comment to the JIRA task
+          const addedComment = await jiraClient.addComment(commentTaskId, comment);
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                id: addedComment.id,
+                taskId: commentTaskId,
+                comment: addedComment.body,
+                author: addedComment.author,
+                created: addedComment.created,
+                updated: addedComment.updated
+              }, null, 2)
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error adding comment to task ${commentTaskId}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+
+      case "getTaskComments":
+        const { taskId: commentsTaskId } = request.params.arguments;
+        try {
+          // Get the issue details which includes comments
+          const issue = await jiraClient.findIssue(commentsTaskId, { fields: ['comment'] });
+          
+          // Extract and format comments
+          const comments = issue.fields.comment?.comments || [];
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify(comments.map(comment => ({
+                id: comment.id,
+                author: {
+                  id: comment.author.id,
+                  name: comment.author.displayName,
+                  emailAddress: comment.author.emailAddress
+                },
+                body: comment.body,
+                created: comment.created,
+                updated: comment.updated,
+                jsdPublic: comment.jsdPublic
+              })), null, 2)
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error getting comments for task ${commentsTaskId}: ${error.message}`
             }],
             isError: true
           };

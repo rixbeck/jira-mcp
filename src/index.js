@@ -228,6 +228,109 @@ const GET_COMMENTS_TOOL = {
   }
 };
 
+const GET_PROJECT_USERS_TOOL = {
+  name: "getProjectUsers",
+  description: "Get list of available users under a specific JIRA project",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectKey: {
+        type: "string",
+        description: "JIRA project key (e.g., PROJECTKEY)"
+      },
+      maxResults: {
+        type: "integer",
+        description: "Maximum number of results to return (default: 50)",
+        default: 50
+      },
+      startAt: {
+        type: "integer",
+        description: "Starting index of results (default: 0)",
+        default: 0
+      }
+    },
+    required: ["projectKey"]
+  }
+};
+
+const CREATE_TASK_TOOL = {
+  name: "createTask",
+  description: "Create a new JIRA task in a project",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectKey: {
+        type: "string",
+        description: "JIRA project key where the task will be created (e.g., PROJECTKEY)"
+      },
+      summary: {
+        type: "string",
+        description: "Summary/title of the task"
+      },
+      description: {
+        type: "string",
+        description: "Detailed description of the task",
+        nullable: true
+      },
+      issueTypeId: {
+        type: "string",
+        description: "ID of the issue type (e.g., '10001' for Bug, '10002' for Story)"
+      },
+      priorityId: {
+        type: "string",
+        description: "ID of the priority (e.g., '1' for Highest, '2' for High)",
+        nullable: true
+      },
+      assigneeAccountId: {
+        type: "string",
+        description: "Account ID of the user to assign the task to",
+        nullable: true
+      },
+      reporterAccountId: {
+        type: "string",
+        description: "Account ID of the user who will be the reporter",
+        nullable: true
+      },
+      labels: {
+        type: "array",
+        items: { type: "string" },
+        description: "Array of labels to add to the task",
+        nullable: true
+      }
+    },
+    required: ["projectKey", "summary", "issueTypeId"]
+  }
+};
+
+const ADD_ATTACHMENT_TOOL = {
+  name: "addAttachment",
+  description: "Add an attachment to a JIRA task",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      },
+      filePath: {
+        type: "string",
+        description: "Path to the file to attach"
+      },
+      filename: {
+        type: "string",
+        description: "Optional filename to use for the attachment. If not provided, the original filename will be used.",
+        nullable: true
+      },
+      comment: {
+        type: "string",
+        description: "Optional comment to add with the attachment",
+        nullable: true
+      }
+    },
+    required: ["taskId", "filePath"]
+  }
+};
+
 const server = new Server(
   {
     name: "jira-mcp",
@@ -253,7 +356,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     DOWNLOAD_TASK_ATTACHMENT_TOOL,
     DOWNLOAD_TASK_ATTACHMENTS_TOOL,
     ADD_COMMENT_TOOL,
-    GET_COMMENTS_TOOL
+    GET_COMMENTS_TOOL,
+    GET_PROJECT_USERS_TOOL,
+    CREATE_TASK_TOOL,
+    ADD_ATTACHMENT_TOOL
   ],
 }));
 
@@ -623,6 +729,168 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{
               type: "text",
               text: `Error getting comments for task ${commentsTaskId}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+
+      case "getProjectUsers":
+        const { projectKey: userProjectKey, maxResults = 50, startAt = 0 } = request.params.arguments;
+        try {
+          // Get users assignable to the project using JIRA's user search
+          // We'll use the user search with project context to find assignable users
+          const users = await jiraClient.getUsersAssignableToProject({
+            projectKey: userProjectKey,
+            maxResults,
+            startAt
+          });
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify(users.map(user => ({
+                accountId: user.accountId,
+                displayName: user.displayName,
+                emailAddress: user.emailAddress,
+                active: user.active,
+                timeZone: user.timeZone,
+                avatarUrls: user.avatarUrls
+              })), null, 2)
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error getting users for project ${userProjectKey}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+
+      case "createTask":
+        const {
+          projectKey,
+          summary,
+          description,
+          issueTypeId,
+          priorityId,
+          assigneeAccountId,
+          reporterAccountId,
+          labels
+        } = request.params.arguments;
+        
+        try {
+          // Build the issue object
+          const issueData = {
+            fields: {
+              project: {
+                key: projectKey
+              },
+              summary: summary,
+              description: description || "",
+              issuetype: {
+                id: issueTypeId
+              }
+            }
+          };
+          
+          // Add optional fields if provided
+          if (priorityId) {
+            issueData.fields.priority = {
+              id: priorityId
+            };
+          }
+          
+          if (assigneeAccountId) {
+            issueData.fields.assignee = {
+              id: assigneeAccountId
+            };
+          }
+          
+          if (reporterAccountId) {
+            issueData.fields.reporter = {
+              id: reporterAccountId
+            };
+          }
+          
+          if (labels && labels.length > 0) {
+            issueData.fields.labels = labels;
+          }
+          
+          // Create the issue
+          const newIssue = await jiraClient.addNewIssue(issueData);
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                id: newIssue.id,
+                key: newIssue.key,
+                summary: summary,
+                description: description,
+                projectKey: projectKey,
+                issueTypeId: issueTypeId,
+                priorityId: priorityId,
+                assigneeAccountId: assigneeAccountId,
+                reporterAccountId: reporterAccountId,
+                labels: labels
+              }, null, 2)
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error creating task in project ${projectKey}: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+
+      case "addAttachment":
+        const { taskId: addAttachmentTaskId, filePath, filename: attachmentFilename, comment: attachmentComment } = request.params.arguments;
+        try {
+          // Check if the file exists
+          if (!fs.existsSync(filePath)) {
+            return {
+              content: [{
+                type: "text",
+                text: `File not found: ${filePath}`
+              }],
+              isError: true
+            };
+          }
+
+          // Read the file
+          const fileBuffer = fs.readFileSync(filePath);
+          
+          // Get the original filename from the path if not provided
+          const path = require('path');
+          const originalFilename = attachmentFilename || path.basename(filePath);
+          
+          // Add the attachment to the issue
+          const attachment = await jiraClient.addAttachment(addAttachmentTaskId, fileBuffer, originalFilename, attachmentComment);
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                id: attachment.id,
+                filename: attachment.filename,
+                taskId: addAttachmentTaskId,
+                created: attachment.created,
+                size: attachment.size,
+                mimeType: attachment.mimeType,
+                comment: attachmentComment
+              }, null, 2)
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error adding attachment to task ${addAttachmentTaskId}: ${error.message}`
             }],
             isError: true
           };

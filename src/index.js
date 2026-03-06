@@ -16,22 +16,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '..', '.env') });
 
 // Validate required environment variables
-const requiredEnvVars = ['JIRA_HOST', 'JIRA_USERNAME', 'JIRA_ACCESS_TOKEN'];
-const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+if (!process.env.JIRA_HOST) {
+  throw new Error('Missing required environment variable: JIRA_HOST');
+}
 
-if (missingEnvVars.length > 0) {
-  throw new Error(`Missing required environment variables: ${missingEnvVars.join(', ')}`);
+let jiraClientOptions = {
+  host: process.env.JIRA_HOST,
+  protocol: 'https',
+  apiVersion: '2',
+  strictSSL: true,
+};
+
+if (process.env.JIRA_ACCESS_TOKEN) {
+  jiraClientOptions.bearer = process.env.JIRA_ACCESS_TOKEN;
+} else {
+  const missingCreds = [];
+  if (!process.env.JIRA_USERNAME) missingCreds.push('JIRA_USERNAME');
+  if (!process.env.JIRA_PASSWORD) missingCreds.push('JIRA_PASSWORD');
+  if (missingCreds.length) {
+    throw new Error(`Missing required environment variables: ${missingCreds.join(', ')} or JIRA_ACCESS_TOKEN`);
+  }
+  jiraClientOptions.username = process.env.JIRA_USERNAME;
+  jiraClientOptions.password = process.env.JIRA_PASSWORD;
 }
 
 // Create JIRA client instance
-const jiraClient = new JiraClient({
-  host: process.env.JIRA_HOST,
-  username: process.env.JIRA_USERNAME,
-  password: process.env.JIRA_PASSWORD,  // using password instead of token
-  protocol: 'https',
-  apiVersion: '2',
-  strictSSL: true
-});
+const jiraClient = new JiraClient(jiraClientOptions);
 
 // Define MCP tools
 const GET_PROJECTS_TOOL = {

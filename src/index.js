@@ -172,6 +172,41 @@ const server = new Server(
   }
 );
 
+function toCommentBody(body) {
+  if (typeof body === 'string') {
+    return body;
+  }
+
+  // Jira Server/DC typically returns string bodies, but handle ADF-like payloads defensively.
+  if (body && Array.isArray(body.content)) {
+    const textParts = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (typeof node.text === 'string') textParts.push(node.text);
+      if (Array.isArray(node.content)) node.content.forEach(walk);
+    };
+    body.content.forEach(walk);
+    return textParts.join('');
+  }
+
+  return '';
+}
+
+function mapComments(commentField) {
+  if (!commentField || !Array.isArray(commentField.comments)) {
+    return [];
+  }
+
+  return commentField.comments.map((comment) => ({
+    id: comment.id,
+    body: toCommentBody(comment.body),
+    author: comment.author?.displayName,
+    created: comment.created,
+    updated: comment.updated,
+    mentions: []
+  }));
+}
+
 // Set up request handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -211,7 +246,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
       case "getTasks":
-        const { jql, fields = ['summary', 'description', 'status', 'assignee', 'created', 'updated', 'duedate'] } = request.params.arguments;
+        const { jql, fields = ['summary', 'description', 'status', 'assignee', 'created', 'updated', 'duedate', 'comment'] } = request.params.arguments;
         const tasks = await jiraClient.searchJira(jql, { fields });
         return {
           content: [{
@@ -226,7 +261,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               created: issue.fields.created,
               updated: issue.fields.updated,
               duedate: issue.fields.duedate,
-              priority: issue.fields.priority
+              priority: issue.fields.priority,
+              comments: mapComments(issue.fields.comment)
             })), null, 2)
           }]
         };
@@ -247,7 +283,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               created: issue.fields.created,
               updated: issue.fields.updated,
               duedate: issue.fields.duedate,
-              priority: issue.fields.priority
+              priority: issue.fields.priority,
+              comments: mapComments(issue.fields.comment)
             }, null, 2)
           }]
         };

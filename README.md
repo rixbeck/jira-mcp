@@ -7,7 +7,10 @@ A Model Context Protocol (MCP) server that addresses integration with self-hoste
 - Get list of JIRA projects
 - Query JIRA tasks using JQL
 - Get task details
-- Update task status
+- Create a new task
+- Add a comment to a task
+- Update task fields (summary, description, assignee, priority, labels, due date, custom fields), optionally together with the status
+- Update task status (by status or transition name, or by id)
 - Update task assignee
 - Get available task statuses
 - Get task attachments

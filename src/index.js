@@ -92,9 +92,59 @@ const GET_TASK_TOOL = {
   }
 };
 
+const UPDATE_TASK_TOOL = {
+  name: "updateTask",
+  description: "Update fields of a JIRA task, optionally including its status. Only the given fields change.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      },
+      summary: {
+        type: "string",
+        description: "New summary (title)"
+      },
+      description: {
+        type: "string",
+        description: "New description, replacing the previous one"
+      },
+      assignee: {
+        type: "string",
+        description: "JIRA username to assign the task to; empty string unassigns"
+      },
+      priority: {
+        type: "string",
+        description: "Priority name as configured in JIRA (e.g., Major)"
+      },
+      labels: {
+        type: "array",
+        items: { type: "string" },
+        description: "Labels, replacing the current label set"
+      },
+      duedate: {
+        type: "string",
+        description: "Due date in YYYY-MM-DD format"
+      },
+      status: {
+        type: "string",
+        description: "Target status or transition, by name or id (e.g., \"Nyitott\", \"Fejlesztésre kiválasztva\", \"1\"). Runs a workflow transition, so only statuses reachable from the current one are valid — getAvailableStatuses lists them."
+      },
+      // Same escape hatch as createTask: project-specific custom fields go here
+      // instead of growing this schema.
+      extraFields: {
+        type: "object",
+        description: "Additional JIRA fields merged verbatim into the update (e.g., {\"customfield_10001\": \"value\"})"
+      }
+    },
+    required: ["taskId"]
+  }
+};
+
 const UPDATE_TASK_STATUS_TOOL = {
   name: "updateTaskStatus",
-  description: "Update the status of a JIRA task",
+  description: "Update the status of a JIRA task (see also updateTask, which can change status together with other fields)",
   inputSchema: {
     type: "object",
     properties: {
@@ -104,7 +154,7 @@ const UPDATE_TASK_STATUS_TOOL = {
       },
       statusId: {
         type: "string",
-        description: "ID of the target status"
+        description: "Target status or transition, by name or id (e.g., \"Nyitott\", \"Fejlesztésre kiválasztva\", \"1\")"
       }
     },
     required: ["taskId", "statusId"]
@@ -123,7 +173,7 @@ const UPDATE_TASK_OWNER_TOOL = {
       },
       accountId: {
         type: "string",
-        description: "Account ID of the user to assign the task to"
+        description: "JIRA username of the assignee — on Server/DC this is the login name (e.g., siftark), not a Cloud accountId"
       }
     },
     required: ["taskId", "accountId"]
@@ -157,6 +207,75 @@ const GET_AVAILABLE_STATUSES_TOOL = {
       }
     },
     required: ["taskId"]
+  }
+};
+
+const CREATE_TASK_TOOL = {
+  name: "createTask",
+  description: "Create a new JIRA task (issue)",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectKey: {
+        type: "string",
+        description: "Key of the project to create the task in (e.g., RHOR)"
+      },
+      issueType: {
+        type: "string",
+        description: "Issue type name as configured in the project (e.g., Story, Bug, Internal task, Feature Request). Defaults to Story. There is no plain \"Task\" type on this JIRA."
+      },
+      summary: {
+        type: "string",
+        description: "Task summary (title)"
+      },
+      description: {
+        type: "string",
+        description: "Task description"
+      },
+      assignee: {
+        type: "string",
+        description: "JIRA username to assign the task to (Server/DC name, not accountId)"
+      },
+      priority: {
+        type: "string",
+        description: "Priority name as configured in JIRA (e.g., Major)"
+      },
+      labels: {
+        type: "array",
+        items: { type: "string" },
+        description: "Labels to attach to the task"
+      },
+      parentKey: {
+        type: "string",
+        description: "Key of the parent issue, for sub-task types (e.g., PROJECT-123)"
+      },
+      // Escape hatch for project-specific required fields: extend this instead of the
+      // schema above when a JIRA project mandates custom fields (customfield_XXXXX).
+      extraFields: {
+        type: "object",
+        description: "Additional JIRA fields merged verbatim into the create request (e.g., {\"customfield_10001\": \"value\"})"
+      }
+    },
+    required: ["projectKey", "summary"]
+  }
+};
+
+const ADD_TASK_COMMENT_TOOL = {
+  name: "addTaskComment",
+  description: "Add a comment to a JIRA task",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskId: {
+        type: "string",
+        description: "JIRA task ID (e.g., PROJECT-123)"
+      },
+      body: {
+        type: "string",
+        description: "Comment text"
+      }
+    },
+    required: ["taskId", "body"]
   }
 };
 
@@ -207,12 +326,42 @@ function mapComments(commentField) {
   }));
 }
 
+// A status change is a workflow transition, not a field write, so callers cannot just
+// PUT a status. Accept whatever they happen to know — target status name/id or
+// transition name/id — and resolve it here. Shared by updateTask and updateTaskStatus
+// so the two can never drift apart.
+async function resolveTransitionId(taskId, status) {
+  const { transitions } = await jiraClient.listTransitions(taskId);
+  const wanted = String(status).trim().toLowerCase();
+  const match = transitions.find(transition =>
+    transition.to.id === String(status) ||
+    transition.id === String(status) ||
+    transition.to.name.toLowerCase() === wanted ||
+    transition.name.toLowerCase() === wanted
+  );
+
+  if (!match) {
+    const available = transitions
+      .map(transition => `"${transition.name}" -> "${transition.to.name}" (status id ${transition.to.id})`)
+      .join('; ');
+    throw new Error(
+      `No transition matching "${status}" is available from the current status of ${taskId}. ` +
+      `Available: ${available || 'none'}`
+    );
+  }
+
+  return match.id;
+}
+
 // Set up request handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     GET_PROJECTS_TOOL,
     GET_TASKS_TOOL,
     GET_TASK_TOOL,
+    CREATE_TASK_TOOL,
+    ADD_TASK_COMMENT_TOOL,
+    UPDATE_TASK_TOOL,
     UPDATE_TASK_STATUS_TOOL,
     UPDATE_TASK_OWNER_TOOL,
     GET_AVAILABLE_STATUSES_TOOL,
@@ -289,22 +438,148 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }]
         };
 
-      case "updateTaskStatus":
-        const task = request.params.arguments;
-        const transitions = await jiraClient.listTransitions(task.taskId);
-        const transition = transitions.transitions.find(t => t.to.id === task.statusId);
-        
-        if (!transition) {
+      case "createTask":
+        const {
+          projectKey,
+          issueType = 'Story',
+          summary,
+          description,
+          assignee,
+          priority,
+          labels,
+          parentKey,
+          extraFields
+        } = request.params.arguments;
+
+        const issueFields = {
+          project: { key: projectKey },
+          issuetype: { name: issueType },
+          summary
+        };
+
+        if (description) issueFields.description = description;
+        // Jira Server/DC identifies users by name; Cloud's accountId is not accepted here.
+        if (assignee) issueFields.assignee = { name: assignee };
+        if (priority) issueFields.priority = { name: priority };
+        if (labels && labels.length) issueFields.labels = labels;
+        if (parentKey) issueFields.parent = { key: parentKey };
+        if (extraFields) Object.assign(issueFields, extraFields);
+
+        let createdIssue;
+        try {
+          createdIssue = await jiraClient.addNewIssue({ fields: issueFields });
+        } catch (createError) {
+          // Issue type names are per-project configuration, so a rejected type is a
+          // discovery problem, not a bug: answer it with the project's actual types.
+          if (/issuetype/i.test(createError.message)) {
+            const targetProject = await jiraClient.getProject(projectKey);
+            const availableTypes = (targetProject.issueTypes || [])
+              .filter(type => !type.subtask)
+              .map(type => type.name)
+              .join(', ');
+            throw new Error(`${createError.message} Available issue types in ${projectKey}: ${availableTypes}`);
+          }
+          throw createError;
+        }
+
+        const createdTask = await jiraClient.findIssue(createdIssue.key);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              id: createdTask.id,
+              key: createdTask.key,
+              summary: createdTask.fields.summary,
+              status: createdTask.fields.status,
+              assignee: createdTask.fields.assignee,
+              url: `https://${process.env.JIRA_HOST}/browse/${createdTask.key}`
+            }, null, 2)
+          }]
+        };
+
+      case "addTaskComment":
+        const { taskId: commentTaskId, body: commentBody } = request.params.arguments;
+        const newComment = await jiraClient.addComment(commentTaskId, commentBody);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              id: newComment.id,
+              body: toCommentBody(newComment.body),
+              author: newComment.author?.displayName,
+              created: newComment.created
+            }, null, 2)
+          }]
+        };
+
+      case "updateTask":
+        const {
+          taskId: updateTaskId,
+          summary: newSummary,
+          description: newDescription,
+          assignee: newAssignee,
+          priority: newPriority,
+          labels: newLabels,
+          duedate: newDuedate,
+          status: newStatus,
+          extraFields: updateExtraFields
+        } = request.params.arguments;
+
+        const updateFields = {};
+        if (newSummary !== undefined) updateFields.summary = newSummary;
+        if (newDescription !== undefined) updateFields.description = newDescription;
+        // An empty assignee means "unassign", which the API expresses as a null field.
+        if (newAssignee !== undefined) updateFields.assignee = newAssignee ? { name: newAssignee } : null;
+        if (newPriority !== undefined) updateFields.priority = { name: newPriority };
+        if (newLabels !== undefined) updateFields.labels = newLabels;
+        if (newDuedate !== undefined) updateFields.duedate = newDuedate;
+        if (updateExtraFields) Object.assign(updateFields, updateExtraFields);
+
+        const changedParts = [];
+        if (Object.keys(updateFields).length) {
+          await jiraClient.updateIssue(updateTaskId, { fields: updateFields });
+          changedParts.push(...Object.keys(updateFields));
+        }
+
+        // Transition last: a failed field write should not leave the task already moved.
+        if (newStatus !== undefined && newStatus !== null && newStatus !== '') {
+          const transitionId = await resolveTransitionId(updateTaskId, newStatus);
+          await jiraClient.transitionIssue(updateTaskId, { transition: { id: transitionId } });
+          changedParts.push('status');
+        }
+
+        if (!changedParts.length) {
           return {
             content: [{
               type: "text",
-              text: `Invalid status transition for issue ${task.taskId} to status ${task.statusId}`
+              text: `Nothing to update on ${updateTaskId}: no updatable field was given.`
             }],
             isError: true
           };
         }
 
-        await jiraClient.transitionIssue(task.taskId, { transition: { id: transition.id } });
+        const updatedFull = await jiraClient.findIssue(updateTaskId);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              key: updatedFull.key,
+              updated: changedParts,
+              summary: updatedFull.fields.summary,
+              status: updatedFull.fields.status,
+              assignee: updatedFull.fields.assignee,
+              priority: updatedFull.fields.priority,
+              labels: updatedFull.fields.labels,
+              duedate: updatedFull.fields.duedate,
+              url: `https://${process.env.JIRA_HOST}/browse/${updatedFull.key}`
+            }, null, 2)
+          }]
+        };
+
+      case "updateTaskStatus":
+        const task = request.params.arguments;
+        const statusTransitionId = await resolveTransitionId(task.taskId, task.statusId);
+        await jiraClient.transitionIssue(task.taskId, { transition: { id: statusTransitionId } });
         const updatedIssue = await jiraClient.findIssue(task.taskId);
         return {
           content: [{
